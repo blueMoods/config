@@ -1,5 +1,6 @@
 # CLion
 cmake-build-debug/
+.idea/
 
 # Ctags for sublime
 .tags
