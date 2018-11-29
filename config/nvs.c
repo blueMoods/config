@@ -7,20 +7,20 @@
 
 esp_err_t nvs_open(const char* name, nvs_open_mode open_mode, nvs_handle *out_handle){
     FILE *fp = NULL;
-    char f_path[64] = {'\0'};
-    memcpy(f_path, "/home/baohongde/Desktop/workspace/", 34);
+    char f_path[FILE_PATH_LEN + MAX_FILE_NAME_LEN + 1] = {'\0'};
+    memcpy(f_path, FILE_PATH, FILE_PATH_LEN);
     size_t f_name_len = strlen(name);
-    if (f_name_len > 25) {
-        printf("File name is too long, change it no more than 25!\n");
+    if (f_name_len > MAX_FILE_NAME_LEN) {
+        printf("File name is too long, change it no more than %d!\n", MAX_FILE_NAME_LEN);
         return 1;
     }
 
-    memcpy(f_path + 34, name, f_name_len);
+    memcpy(f_path + FILE_PATH_LEN, name, f_name_len);
 
     if (open_mode == NVS_READONLY) {
         fp = fopen(f_path, "r");
     } else if (open_mode == NVS_READWRITE) {
-        fp = fopen(f_path, "w");
+        fp = fopen(f_path, "w+");
     } else {
         fp = NULL;
     }
@@ -43,7 +43,6 @@ esp_err_t nvs_set_blob(nvs_handle handle, const char* key, const void* value, si
 esp_err_t nvs_get_blob(nvs_handle handle, const char* key, void* out_value, size_t* length){
 //    printf("%s unused param key: '%s'\n", __func__, key);
     size_t size = fread(out_value, 1, *length, (FILE *)handle);
-//    printf("fread(0x%08x), size %d\n", handle, size);
     if (size > *length) {
         *length = size;
         return 1;
@@ -52,6 +51,16 @@ esp_err_t nvs_get_blob(nvs_handle handle, const char* key, void* out_value, size
     }
     return 0;
 }
-esp_err_t nvs_commit(nvs_handle handle){
-    return 0;
+
+esp_err_t nvs_erase(const char* name) {
+    char f_path[FILE_PATH_LEN + MAX_FILE_NAME_LEN + 1] = {'\0'};
+    memcpy(f_path, FILE_PATH, FILE_PATH_LEN);
+    size_t f_name_len = strlen(name);
+    if (f_name_len > MAX_FILE_NAME_LEN) {
+        printf("File name is too long, change it no more than %d!\n", MAX_FILE_NAME_LEN);
+        return 1;
+    }
+
+    memcpy(f_path + 14, name, f_name_len);
+    return remove(f_path);
 }

@@ -32,30 +32,89 @@
 // - All strings are case sensitive.
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "list.h"
+
+
+#define CONFIG_FILE_MAX_SIZE             (1536)//1.5k
+#define CONFIG_FILE_DEFAULE_LENGTH       (2048)
+#define CONFIG_KEY                       "bt_cfg_key"
+
+/**
+ * Bit mask
+ */
+#define CONFIG_SECTONS                  0
+
+#define CONFIG_DEV_CLASS                1
+#define CONFIG_PIN_LENGTH               2
+#define CONFIG_LINK_KEY_TYPE            3
+#define CONFIG_LINK_KEY                 4
+
+#define CONFIG_DEV_TYPE                 5
+#define CONFIG_ADDR_TYPE                6
+#define CONFIG_LE_KEY_PENC              7
+#define CONFIG_LE_KEY_PID               8
+#define CONFIG_LE_KEY_PCSRK             9
+#define CONFIG_LE_KEY_LENC              10
+#define CONFIG_LE_KEY_LID               11
+#define CONFIG_LE_KEY_LCSRK             12
+
+#define CONFIG_LE_LOCAL_KEY_IR          13
+#define CONFIG_LE_LOCAL_KEY_IRK         14
+#define CONFIG_LE_LOCAL_KEY_DHK         15
+#define CONFIG_LE_LOCAL_KEY_ER          16
+typedef uint8_t config_type_t;
+
+#define CONFIG_SECTONS_MASK             (1 << CONFIG_SECTONS)
+
+#define CONFIG_DEV_CLASS_MASK           (1 << CONFIG_DEV_CLASS)
+#define CONFIG_PIN_LENGTH_MASK          (1 << CONFIG_PIN_LENGTH)
+#define CONFIG_LINK_KEY_TYPE_MASK       (1 << CONFIG_LINK_KEY_TYPE)
+#define CONFIG_LINK_KEY_MASK            (1 << CONFIG_LINK_KEY)
+
+#define CONFIG_DEV_TYPE_MASK            (1 << CONFIG_DEV_TYPE)
+#define CONFIG_ADDR_TYPE_MASK           (1 << CONFIG_ADDR_TYPE)
+#define CONFIG_LE_KEY_PENC_MASK         (1 << CONFIG_LE_KEY_PENC)
+#define CONFIG_LE_KEY_PID_MASK          (1 << CONFIG_LE_KEY_PID)
+#define CONFIG_LE_KEY_PCSRK_MASK        (1 << CONFIG_LE_KEY_PCSRK)
+#define CONFIG_LE_KEY_LENC_MASK         (1 << CONFIG_LE_KEY_LENC)
+#define CONFIG_LE_KEY_LID_MASK          (1 << CONFIG_LE_KEY_LID)
+#define CONFIG_LE_KEY_LCSRK_MASK        (1 << CONFIG_LE_KEY_LCSRK)
+
+#define CONFIG_LE_LOCAL_KEY_IR_MASK     (1 << CONFIG_LE_LOCAL_KEY_IR)
+#define CONFIG_LE_LOCAL_KEY_IRK_MASK    (1 << CONFIG_LE_LOCAL_KEY_IRK)
+#define CONFIG_LE_LOCAL_KEY_DHK_MASK    (1 << CONFIG_LE_LOCAL_KEY_DHK)
+#define CONFIG_LE_LOCAL_KEY_ER_MASK     (1 << CONFIG_LE_LOCAL_KEY_ER)
+typedef uint32_t config_mask_t;
+
+
+#define CONFIG_LOCAL_ADAPTER_STR           "Adapter"
 
 // The default section name to use if a key/value pair is not defined within
 // a section.
 #define CONFIG_DEFAULT_SECTION "Global"
 
 typedef struct {
-    char *key;
-    char *value;
-} entry_t;
+    char *name;
+    config_mask_t bit_mask;
+} section_node_t;
 
 typedef struct {
-    char *name;
-    list_t *entries;
-} section_t;
+    config_type_t config_type;
+    uint16_t length;
+    uint8_t value[];
+} __attribute__((packed)) entry_t;
+
+typedef struct {
+    config_mask_t bit_mask;
+    uint16_t length;
+    uint8_t value[];     //entry_t
+} __attribute__((packed)) section_t;
 
 typedef struct {
     list_t *sections;
 }config_t;
 
-//typedef struct {
-//
-//}config_section_node_t;
-//typedef struct config_t config_t;
 typedef struct config_section_node_t config_section_node_t;
 
 // Creates a new config object with no entries (i.e. not backed by a file).
@@ -77,48 +136,21 @@ void config_free(config_t *config);
 
 // Returns true if the config file contains a section named |section|. If
 // the section has no key/value pairs in it, this function will return false.
-// |config| and |section| must not be NULL.
-bool config_has_section(const config_t *config, const char *section);
+// |config| and |section_name| must not be NULL.
+bool config_has_section(const config_t *config, const char *section_name);
 
-// Returns true if the config file has a key named |key| under |section|.
-// Returns false otherwise. |config|, |section|, and |key| must not be NULL.
-bool config_has_key(const config_t *config, const char *section, const char *key);
+// Returns true if the config file has a key which type is |key| under |section|.
+// Returns false otherwise. |config|, |section_name| must not be NULL.
+bool config_has_key(const config_t *config, const char *section_name, config_type_t key);
 
-// Returns true if the config file has a key named |key| and the key_value.
-// Returns false otherwise. |config|, |key|, and |key_value| must not be NULL.
-bool config_has_key_in_section(config_t *config, const char *key, char *key_value);
+// Return true if the config file contains a key which type is |key| and the buffer |value| is enough to store it.
+// Returns false otherwise. |config|, |section_name| must not be NULL.
+bool config_get(const config_t *config, const char *section_name, const config_type_t key, void *value,  uint16_t *length);
 
-// Returns the integral value for a given |key| in |section|. If |section|
-// or |key| do not exist, or the value cannot be fully converted to an integer,
-// this function returns |def_value|. |config|, |section|, and |key| must not
-// be NULL.
-int config_get_int(const config_t *config, const char *section, const char *key, int def_value);
-
-// Returns the boolean value for a given |key| in |section|. If |section|
-// or |key| do not exist, or the value cannot be converted to a boolean, this
-// function returns |def_value|. |config|, |section|, and |key| must not be NULL.
-bool config_get_bool(const config_t *config, const char *section, const char *key, bool def_value);
-
-// Returns the string value for a given |key| in |section|. If |section| or
-// |key| do not exist, this function returns |def_value|. The returned string
-// is owned by the config module and must not be freed. |config|, |section|,
-// and |key| must not be NULL. |def_value| may be NULL.
-const char *config_get_string(const config_t *config, const char *section, const char *key, const char *def_value);
-
-// Sets an integral value for the |key| in |section|. If |key| or |section| do
-// not already exist, this function creates them. |config|, |section|, and |key|
-// must not be NULL.
-void config_set_int(config_t *config, const char *section, const char *key, int value);
-
-// Sets a boolean value for the |key| in |section|. If |key| or |section| do
-// not already exist, this function creates them. |config|, |section|, and |key|
-// must not be NULL.
-void config_set_bool(config_t *config, const char *section, const char *key, bool value);
-
-// Sets a string value for the |key| in |section|. If |key| or |section| do
-// not already exist, this function creates them. |config|, |section|, |key|, and
+// Sets a value for the |key| in |section|. If |key| or |section| do
+// not already exist, this function creates them. |config|, |section| and
 // |value| must not be NULL.
-void config_set_string(config_t *config, const char *section, const char *key, const char *value, bool insert_back);
+void config_set(config_t *config, const char *section_name, const config_type_t key, void *value, uint16_t length);
 
 // Removes |section| from the |config| (and, as a result, all keys in the section).
 // Returns true if |section| was found and removed from |config|, false otherwise.
@@ -127,8 +159,8 @@ bool config_remove_section(config_t *config, const char *section);
 
 // Removes one specific |key| residing in |section| of the |config|. Returns true
 // if the section and key were found and the key was removed, false otherwise.
-// None of |config|, |section|, or |key| may be NULL.
-bool config_remove_key(config_t *config, const char *section, const char *key);
+// None of |config| or |section| may be NULL.
+bool config_remove_key(config_t *config, const char *section_name, const config_type_t key);
 
 // Returns an iterator to the first section in the config file. If there are no
 // sections, the iterator will equal the return value of |config_section_end|.
