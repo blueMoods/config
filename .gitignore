@@ -5,3 +5,7 @@ cmake-build-debug/
 # Ctags for sublime
 .tags
 .tags_sorted_by_file
+
+# stored file
+file_system/*
+file_system/!README.md

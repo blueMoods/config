@@ -23,9 +23,9 @@
 #include "config.h"
 #include "nvs.h"
 
-#define CONFIG_FILE_MAX_SIZE             (1536)//1.5k
-#define CONFIG_FILE_DEFAULE_LENGTH       (2048)
-#define CONFIG_KEY                       "bt_cfg_key"
+//#define CONFIG_FILE_MAX_SIZE             (1536)//1.5k
+//#define CONFIG_FILE_DEFAULE_LENGTH       (2048)
+//#define CONFIG_KEY                       "bt_cfg_key"
 
 //typedef struct {
 //    char *key;
@@ -48,15 +48,26 @@
 // Empty definition; this type is aliased to list_node_t.
 //struct config_section_iter_t {};
 
-static void config_parse(nvs_handle fp, config_t *config);
+static void config_parse(const char *filename, config_t *config);
 
-static section_t *section_new(const char *name);
-static void section_free(void *ptr);
-static section_t *section_find(const config_t *config, const char *section);
+/*********************************************************************
+ * APIs of section                                                   *
+ *********************************************************************/
+static section_node_t *section_node_find(const config_t *config, const char *section_name);
+static void section_node_free(void *ptr);
 
-static entry_t *entry_new(const char *key, const char *value);
-static void entry_free(void *ptr);
-static entry_t *entry_find(const config_t *config, const char *section, const char *key);
+static section_t *section_new(void);
+static void section_free(section_t *section);
+static section_t *section_get(const char *name);
+static bool section_set(const char *name, section_t *section);
+
+/*********************************************************************
+ * APIs of entry                                                     *
+ *********************************************************************/
+static entry_t *entry_new(section_t *section, config_type_t config_type, uint8_t *value, uint16_t length);
+static bool entry_free(section_t *section, entry_t *entry);
+static entry_t *entry_get(section_t *section, config_type_t config_type);
+static entry_t *entry_set(section_t *section, config_type_t config_type, uint8_t *value, uint16_t length);
 
 char *osi_strdup(const char *str)
 {
@@ -68,6 +79,7 @@ char *osi_strdup(const char *str)
     }
 
     memcpy(new_string, str, size);
+    new_string[size - 1] = 0;
     return new_string;
 }
 
@@ -75,13 +87,13 @@ config_t *config_new_empty(void)
 {
     config_t *config = malloc(sizeof(config_t));
     if (!config) {
-//        OSI_TRACE_ERROR("%s unable to allocate memory for config_t.\n", __func__);
+        printf("%s unable to allocate memory for config_t.\n", __func__);
         goto error;
     }
 
-    config->sections = list_new(section_free);
+    config->sections = list_new(section_node_free);
     if (!config->sections) {
-//        OSI_TRACE_ERROR("%s unable to allocate list for sections.\n", __func__);
+        printf("%s unable to allocate list for sections.\n", __func__);
         goto error;
     }
 
@@ -101,24 +113,7 @@ config_t *config_new(const char *filename)
         return NULL;
     }
 
-    esp_err_t err;
-    nvs_handle fp;
-    err = nvs_open(filename, NVS_READONLY, &fp);
-//    if (err != 0) {
-//        if (err == 1) {
-////            OSI_TRACE_ERROR("%s: NVS not initialized. "
-////                      "Call nvs_flash_init before initializing bluetooth.", __func__);
-//        } else {
-////            OSI_TRACE_ERROR("%s unable to open NVS namespace '%s'\n", __func__, filename);
-//        }
-//        config_free(config);
-//        return NULL;
-//    }
-
-    if (err == 0){
-        config_parse(fp, config);
-        nvs_close(fp);
-    }
+    config_parse(filename, config);
 
     return config;
 }
@@ -133,164 +128,144 @@ void config_free(config_t *config)
     free(config);
 }
 
-bool config_has_section(const config_t *config, const char *section)
+bool config_has_section(const config_t *config, const char *section_name)
 {
     assert(config != NULL);
-    assert(section != NULL);
+    assert(section_name != NULL);
 
-    return (section_find(config, section) != NULL);
+    return (section_node_find(config, section_name) != NULL);
 }
 
-bool config_has_key(const config_t *config, const char *section, const char *key)
+bool config_has_key(const config_t *config, const char *section_name, config_type_t key)
 {
     assert(config != NULL);
-    assert(section != NULL);
-    assert(key != NULL);
+    assert(section_name != NULL);
 
-    return (entry_find(config, section, key) != NULL);
-}
-
-bool config_has_key_in_section(config_t *config, const char *key, char *key_value)
-{
-//    OSI_TRACE_DEBUG("key = %s, value = %s", key, key_value);
-    for (const list_node_t *node = list_begin(config->sections); node != list_end(config->sections); node = list_next(node)) {
-        const section_t *section = (const section_t *)list_node(node);
-
-        for (const list_node_t *node = list_begin(section->entries); node != list_end(section->entries); node = list_next(node)) {
-            entry_t *entry = list_node(node);
-//            OSI_TRACE_DEBUG("entry->key = %s, entry->value = %s", entry->key, entry->value);
-            if (!strcmp(entry->key, key) && !strcmp(entry->value, key_value)) {
-//                OSI_TRACE_DEBUG("%s, the irk aready in the flash.", __func__);
-                return true;
-            }
-        }
+    section_node_t *sec = section_node_find(config, section_name);
+    if (sec == NULL) {
+        return false;
     }
-
+    if (sec->bit_mask & (1 << key)) {
+        return true;
+    }
     return false;
 }
 
-int config_get_int(const config_t *config, const char *section, const char *key, int def_value)
+bool config_get(const config_t *config, const char *section_name, const config_type_t key, void *value,  uint16_t *length)
 {
     assert(config != NULL);
-    assert(section != NULL);
-    assert(key != NULL);
+    assert(section_name != NULL);
 
-    entry_t *entry = entry_find(config, section, key);
-    if (!entry) {
-        return def_value;
-    }
-
-    char *endptr;
-    int ret = strtol(entry->value, &endptr, 0);
-    return (*endptr == '\0') ? ret : def_value;
-}
-
-bool config_get_bool(const config_t *config, const char *section, const char *key, bool def_value)
-{
-    assert(config != NULL);
-    assert(section != NULL);
-    assert(key != NULL);
-
-    entry_t *entry = entry_find(config, section, key);
-    if (!entry) {
-        return def_value;
-    }
-
-    if (!strcmp(entry->value, "true")) {
-        return true;
-    }
-    if (!strcmp(entry->value, "false")) {
+    if (!config_has_key(config, section_name, key)) {
+        *length = 0;
         return false;
     }
 
-    return def_value;
-}
-
-const char *config_get_string(const config_t *config, const char *section, const char *key, const char *def_value)
-{
-    assert(config != NULL);
-    assert(section != NULL);
-    assert(key != NULL);
-
-    entry_t *entry = entry_find(config, section, key);
-    if (!entry) {
-        return def_value;
+    section_t *section = section_get(section_name);
+    if (section == NULL) {
+        return false;
+    }
+    entry_t *entry = entry_get(section, key);
+    if (entry == NULL) {
+        return false;
+    }
+    if (entry->length > *length) {
+        // Buf for value is not long enough
+        *length = entry->length;
+        return false;
     }
 
-    return entry->value;
+    *length = entry->length;
+    memcpy(value, entry->value, entry->length);
+
+    section_free(section);
+    return true;
 }
 
-void config_set_int(config_t *config, const char *section, const char *key, int value)
+void config_set(config_t *config, const char *section_name, const config_type_t key, void *value, uint16_t length)
 {
     assert(config != NULL);
-    assert(section != NULL);
-    assert(key != NULL);
+    assert(section_name != NULL);
+    assert(key != CONFIG_SECTONS);
 
-    char value_str[32] = { 0 };
-    sprintf(value_str, "%d", value);
-    config_set_string(config, section, key, value_str, false);
-}
-
-void config_set_bool(config_t *config, const char *section, const char *key, bool value)
-{
-    assert(config != NULL);
-    assert(section != NULL);
-    assert(key != NULL);
-
-    config_set_string(config, section, key, value ? "true" : "false", false);
-}
-
-void config_set_string(config_t *config, const char *section, const char *key, const char *value, bool insert_back)
-{
-    section_t *sec = section_find(config, section);
+    section_t *section;
+    section_node_t *sec = section_node_find(config, section_name);
     if (!sec) {
-        sec = section_new(section);
-        if (insert_back) {
-            list_append(config->sections, sec);
-        } else {
-            list_prepend(config->sections, sec);
-        }
-    }
-
-    for (const list_node_t *node = list_begin(sec->entries); node != list_end(sec->entries); node = list_next(node)) {
-        entry_t *entry = list_node(node);
-        if (!strcmp(entry->key, key)) {
-            free(entry->value);
-            entry->value = osi_strdup(value);
+        size_t len = strlen(section_name);
+        if (len > 25){
+            printf("ERROR: name is too long.\n");
             return;
         }
+
+        sec = malloc(sizeof(section_node_t));
+        sec->name = osi_strdup(section_name);
+        sec->bit_mask = 0;
+        list_append(config->sections, sec);
+
+        section = section_new();
+    } else {
+        section = section_get(section_name);
     }
 
-    entry_t *entry = entry_new(key, value);
-    list_append(sec->entries, entry);
+    if(section == NULL) {
+        printf("ERROR: %s failed.\n", __func__);
+        return;
+    }
+
+    sec->bit_mask |= (1 << key);
+    entry_set(section, key, value, length);
+    section_set(section_name, section);
+    section_free(section);
 }
 
-bool config_remove_section(config_t *config, const char *section)
+bool config_remove_section(config_t *config, const char *section_name)
 {
     assert(config != NULL);
-    assert(section != NULL);
+    assert(section_name != NULL);
 
-    section_t *sec = section_find(config, section);
+    section_node_t *sec = section_node_find(config, section_name);
     if (!sec) {
         return false;
     }
 
-    return list_remove(config->sections, sec);
+    section_set(section_name, NULL);
+
+    free(sec->name);
+    list_remove(config->sections, sec);
+    return true;
 }
 
-bool config_remove_key(config_t *config, const char *section, const char *key)
+bool config_remove_key(config_t *config, const char *section_name, const config_type_t key)
 {
     assert(config != NULL);
-    assert(section != NULL);
-    assert(key != NULL);
+    assert(section_name != NULL);
+    assert(key != CONFIG_SECTONS);
 
-    section_t *sec = section_find(config, section);
-    entry_t *entry = entry_find(config, section, key);
-    if (!sec || !entry) {
+    if (!config_has_key(config, section_name, key)) {
         return false;
     }
 
-    return list_remove(sec->entries, entry);
+    section_node_t *sec = section_node_find(config, section_name);
+    if (sec == NULL) {
+        return false;
+    }
+    if (sec->bit_mask == (1 << key)) {
+        // only have one entry in section, remove it.
+        return config_remove_section(config, section_name);
+    }
+
+    section_t *section = section_get(section_name);
+    if (section ==NULL) {
+        return false;
+    }
+
+    sec->bit_mask &= ~(1 << key);
+    entry_t *entry = entry_get(section, key);
+    entry_free(section, entry);
+
+    section_set(section_name, section);
+    section_free(section);
+    return true;
 }
 
 const config_section_node_t *config_section_begin(const config_t *config)
@@ -315,82 +290,8 @@ const char *config_section_name(const config_section_node_t *node)
 {
     assert(node != NULL);
     const list_node_t *lnode = (const list_node_t *)node;
-    const section_t *section = (const section_t *)list_node(lnode);
-    return section->name;
-}
-
-static int get_config_size(const config_t *config)
-{
-    assert(config != NULL);
-
-    int w_len = 0, total_size = 0;
-
-    for (const list_node_t *node = list_begin(config->sections); node != list_end(config->sections); node = list_next(node)) {
-        const section_t *section = (const section_t *)list_node(node);
-        w_len = strlen(section->name) + strlen("[]\n");// format "[section->name]\n"
-        total_size += w_len;
-
-        for (const list_node_t *enode = list_begin(section->entries); enode != list_end(section->entries); enode = list_next(enode)) {
-            const entry_t *entry = (const entry_t *)list_node(enode);
-            w_len = strlen(entry->key) + strlen(entry->value) + strlen(" = \n");// format "entry->key = entry->value\n"
-            total_size += w_len;
-        }
-
-        // Only add a separating newline if there are more sections.
-        if (list_next(node) != list_end(config->sections)) {
-                total_size ++;  //'\n'
-        } else {
-            break;
-        }
-    }
-    total_size ++; //'\0'
-    return total_size;
-}
-
-static int get_config_size_from_flash(nvs_handle fp)
-{
-    assert(fp != 0);
-
-    esp_err_t err;
-    char *keyname = malloc(sizeof(CONFIG_KEY) + 1);
-    if (!keyname){
-//        OSI_TRACE_ERROR("%s, malloc error\n", __func__);
-        return 0;
-    }
-    size_t length = CONFIG_FILE_DEFAULE_LENGTH;
-    size_t total_length = 0;
-    u_int16_t i = 0;
-    snprintf(keyname, sizeof(CONFIG_KEY) + 1, "%s%d", CONFIG_KEY, 0);
-    char aaa[CONFIG_FILE_DEFAULE_LENGTH] = {'\0'};
-    err = nvs_get_blob(fp, keyname, aaa, &length);
-
-//    if (err == ESP_ERR_NVS_NOT_FOUND) {
-//        free(keyname);
-//        return 0;
-//    }
-    if (err != 0) {
-        printf("%s, error %d\n", __func__, err);
-        free(keyname);
-        return 0;
-    }
-    total_length += length;
-    while (length == CONFIG_FILE_MAX_SIZE) {
-        length = CONFIG_FILE_DEFAULE_LENGTH;
-        snprintf(keyname, sizeof(CONFIG_KEY) + 1, "%s%d", CONFIG_KEY, ++i);
-        err = nvs_get_blob(fp, keyname, NULL, &length);
-
-        if (err == 1) {
-            break;
-        }
-        if (err != 0) {
-//            OSI_TRACE_ERROR("%s, error %d\n", __func__, err);
-            free(keyname);
-            return 0;
-        }
-        total_length += length;
-    }
-    free(keyname);
-    return total_length;
+    const section_node_t *sec = (const section_node_t *)list_node(lnode);
+    return sec->name;
 }
 
 bool config_save(const config_t *config, const char *filename)
@@ -399,265 +300,71 @@ bool config_save(const config_t *config, const char *filename)
     assert(filename != NULL);
     assert(*filename != '\0');
 
-    esp_err_t err;
-    int err_code = 0;
-    nvs_handle fp;
-    char *line = malloc(1024);
-    char *keyname = malloc(sizeof(CONFIG_KEY) + 1);
-    int config_size = get_config_size(config);
-    char *buf = malloc(config_size + 100);
-    if (!line || !buf || !keyname) {
-        err_code |= 0x01;
-        goto error;
+    section_t *section = section_new();
+    if (section == NULL) {
+        return false;
     }
 
-    err = nvs_open(filename, NVS_READWRITE, &fp);
-    if (err != 0) {
-        if (err == 1) {
-//            OSI_TRACE_ERROR("%s: NVS not initialized. "
-//                      "Call nvs_flash_init before initializing bluetooth.", __func__);
-        }
-        err_code |= 0x02;
-        goto error;
-    }
+    uint8_t entry_value[25 + 4];
+    uint8_t *p;
+    uint8_t entry_length = 0;
 
-    int w_cnt, w_cnt_total = 0;
     for (const list_node_t *node = list_begin(config->sections); node != list_end(config->sections); node = list_next(node)) {
-        const section_t *section = (const section_t *)list_node(node);
-        w_cnt = snprintf(line, 1024, "[%s]\n", section->name);
-//        OSI_TRACE_DEBUG("section name: %s, w_cnt + w_cnt_total = %d\n", section->name, w_cnt + w_cnt_total);
-        memcpy(buf + w_cnt_total, line, w_cnt);
-        w_cnt_total += w_cnt;
-
-        for (const list_node_t *enode = list_begin(section->entries); enode != list_end(section->entries); enode = list_next(enode)) {
-            const entry_t *entry = (const entry_t *)list_node(enode);
-//            OSI_TRACE_DEBUG("(key, val): (%s, %s)\n", entry->key, entry->value);
-            w_cnt = snprintf(line, 1024, "%s = %s\n", entry->key, entry->value);
-//            OSI_TRACE_DEBUG("%s, w_cnt + w_cnt_total = %d", __func__, w_cnt + w_cnt_total);
-            memcpy(buf + w_cnt_total, line, w_cnt);
-            w_cnt_total += w_cnt;
-        }
-
-        // Only add a separating newline if there are more sections.
-        if (list_next(node) != list_end(config->sections)) {
-            buf[w_cnt_total] = '\n';
-            w_cnt_total += 1;
-        } else {
-            break;
-        }
-    }
-    buf[w_cnt_total] = '\0';
-    if (w_cnt_total < CONFIG_FILE_MAX_SIZE) {
-        snprintf(keyname, sizeof(CONFIG_KEY)+1, "%s%d", CONFIG_KEY, 0);
-        err = nvs_set_blob(fp, keyname, buf, w_cnt_total);
-        if (err != 0) {
-            nvs_close(fp);
-            err_code |= 0x04;
-            goto error;
-        }
-    }else {
-        uint count = (w_cnt_total / CONFIG_FILE_MAX_SIZE);
-        for (int i = 0; i <= count; i++)
-        {
-            snprintf(keyname, sizeof(CONFIG_KEY)+1, "%s%d", CONFIG_KEY, i);
-            if (i == count) {
-                err = nvs_set_blob(fp, keyname, buf + i*CONFIG_FILE_MAX_SIZE, w_cnt_total - i*CONFIG_FILE_MAX_SIZE);
-//                OSI_TRACE_DEBUG("save keyname = %s, i = %d, %d\n", keyname, i, w_cnt_total - i*CONFIG_FILE_MAX_SIZE);
-            }else {
-                err = nvs_set_blob(fp, keyname, buf + i*CONFIG_FILE_MAX_SIZE, CONFIG_FILE_MAX_SIZE);
-//                OSI_TRACE_DEBUG("save keyname = %s, i = %d, %d\n", keyname, i, CONFIG_FILE_MAX_SIZE);
-            }
-            if (err != 0) {
-                nvs_close(fp);
-                err_code |= 0x04;
-                goto error;
-            }
-        }
+        p = entry_value;
+        entry_length = 0;
+        section_node_t *sec = list_node(node);
+        memcpy(p, sec->name, strlen(sec->name));
+        p += strlen(sec->name);
+        entry_length += strlen(sec->name);
+        *p = 0;
+        p ++;
+        entry_length ++;
+        memcpy(p, &(sec->bit_mask), sizeof(config_mask_t));
+        entry_length += sizeof(config_mask_t);
+        entry_set(section, CONFIG_SECTONS, entry_value, entry_length);
     }
 
-    err = nvs_commit(fp);
-    if (err != 0) {
-        nvs_close(fp);
-        err_code |= 0x08;
-        goto error;
-    }
+    section_set(filename, section);
+    section_free(section);
 
-    nvs_close(fp);
-    free(line);
-    free(buf);
-    free(keyname);
     return true;
-
-error:
-    if (buf) {
-        free(buf);
-    }
-    if (line) {
-        free(line);
-    }
-    if (keyname) {
-        free(keyname);
-    }
-    if (err_code) {
-//        OSI_TRACE_ERROR("%s, err_code: 0x%x\n", __func__, err_code);
-    }
-    return false;
 }
 
-static char *trim(char *str)
+static void config_parse(const char *filename, config_t *config)
 {
-    while (isspace((unsigned char)(*str))) {
-        ++str;
-    }
-
-    if (!*str) {
-        return str;
-    }
-
-    char *end_str = str + strlen(str) - 1;
-    while (end_str > str && isspace((unsigned char)(*end_str))) {
-        --end_str;
-    }
-
-    end_str[1] = '\0';
-    return str;
-}
-
-static void config_parse(nvs_handle fp, config_t *config)
-{
-    assert(fp != 0);
+    assert(filename != 0);
     assert(config != NULL);
 
-    esp_err_t err;
-    int line_num = 0;
-    int err_code = 0;
-    u_int16_t i = 0;
-    size_t length = CONFIG_FILE_DEFAULE_LENGTH;
-    size_t total_length = 0;
-    char *line = malloc(1024);
-    char *section = malloc(1024);
-    char *keyname = malloc(sizeof(CONFIG_KEY) + 1);
-//    int buf_size = get_config_size_from_flash(fp);
-//    char *buf = malloc(buf_size + 100);
-    char *buf = malloc(CONFIG_FILE_DEFAULE_LENGTH + 100);
-    if (!line || !section || !buf || !keyname) {
-        err_code |= 0x01;
-        goto error;
-    }
-    snprintf(keyname, sizeof(CONFIG_KEY)+1, "%s%d", CONFIG_KEY, 0);
-    err = nvs_get_blob(fp, keyname, buf, &length);
-
-    if (err == 1) {
-        goto error;
-    }
-    if (err != 0) {
-        err_code |= 0x02;
-        goto error;
-    }
-    total_length += length;
-    while (length == CONFIG_FILE_MAX_SIZE) {
-        length = CONFIG_FILE_DEFAULE_LENGTH;
-        snprintf(keyname, sizeof(CONFIG_KEY) + 1, "%s%d", CONFIG_KEY, ++i);
-        err = nvs_get_blob(fp, keyname, buf + CONFIG_FILE_MAX_SIZE * i, &length);
-
-        if (err == 1) {
-            break;
-        }
-        if (err != 0) {
-            err_code |= 0x02;
-            goto error;
-        }
-        total_length += length;
-    }
-    char *p_line_end;
-    char *p_line_bgn = buf;
-    strcpy(section, CONFIG_DEFAULT_SECTION);
-
-    while ( (p_line_bgn < buf + total_length - 1) && (p_line_end = strchr(p_line_bgn, '\n'))) {
-
-        // get one line
-        int line_len = p_line_end - p_line_bgn;
-        if (line_len > 1023) {
-//            OSI_TRACE_WARNING("%s exceed max line length on line %d.\n", __func__, line_num);
-            break;
-        }
-        memcpy(line, p_line_bgn, line_len);
-        line[line_len] = '\0';
-        p_line_bgn = p_line_end + 1;
-        char *line_ptr = trim(line);
-        ++line_num;
-
-        // Skip blank and comment lines.
-        if (*line_ptr == '\0' || *line_ptr == '#') {
-            continue;
-        }
-
-        if (*line_ptr == '[') {
-            size_t len = strlen(line_ptr);
-            if (line_ptr[len - 1] != ']') {
-//                OSI_TRACE_WARNING("%s unterminated section name on line %d.\n", __func__, line_num);
-                continue;
-            }
-            strncpy(section, line_ptr + 1, len - 2);
-            section[len - 2] = '\0';
-        } else {
-            char *split = strchr(line_ptr, '=');
-            if (!split) {
-//                OSI_TRACE_DEBUG("%s no key/value separator found on line %d.\n", __func__, line_num);
-                continue;
-            }
-            *split = '\0';
-            config_set_string(config, section, trim(line_ptr), trim(split + 1), true);
-        }
-    }
-
-error:
-    if (buf) {
-        free(buf);
-    }
-    if (line) {
-        free(line);
-    }
-    if (section) {
-        free(section);
-    }
-    if (keyname) {
-        free(keyname);
-    }
-    if (err_code) {
-//        OSI_TRACE_ERROR("%s returned with err code: %d\n", __func__, err_code);
-    }
-}
-
-static section_t *section_new(const char *name)
-{
-    section_t *section = malloc(sizeof(section_t));
-    if (!section) {
-        return NULL;
-    }
-
-    section->name = osi_strdup(name);
-    section->entries = list_new(entry_free);
-    return section;
-}
-
-static void section_free(void *ptr)
-{
-    if (!ptr) {
+    section_t *section = section_get(filename);
+    if (section == NULL || !(section->bit_mask & CONFIG_SECTONS_MASK)) {
         return;
     }
 
-    section_t *section = ptr;
-    free(section->name);
-    list_free(section->entries);
-    free(section);
+    config_mask_t *p;
+    section_node_t *sec;
+    entry_t *entry = entry_get(section, CONFIG_SECTONS);
+    while (entry) {
+        sec = malloc(sizeof(section_node_t));
+        sec->name = osi_strdup((const char*)entry->value);
+        p = (config_mask_t *)(entry->value + entry->length - sizeof(config_mask_t));
+        sec->bit_mask = *p;
+        list_append(config->sections, sec);
+
+        entry_free(section, entry);
+        entry = entry_get(section, CONFIG_SECTONS);
+    }
+
+    section_free(section);
 }
 
-static section_t *section_find(const config_t *config, const char *section)
+/*********************************************************************
+ * APIs of section                                                   *
+ *********************************************************************/
+static section_node_t *section_node_find(const config_t *config, const char *section_name)
 {
     for (const list_node_t *node = list_begin(config->sections); node != list_end(config->sections); node = list_next(node)) {
-        section_t *sec = list_node(node);
-        if (!strcmp(sec->name, section)) {
+        section_node_t *sec = list_node(node);
+        if (!strcmp(sec->name, section_name)) {
             return sec;
         }
     }
@@ -665,43 +372,195 @@ static section_t *section_find(const config_t *config, const char *section)
     return NULL;
 }
 
-static entry_t *entry_new(const char *key, const char *value)
+static void section_node_free(void *ptr)
 {
-    entry_t *entry = malloc(sizeof(entry_t));
-    if (!entry) {
+    section_node_t *sec = ptr;
+    free(sec->name);
+    free(sec);
+}
+//static section_node_t *section_node_new(const config_t *config, const char *section_name)
+//{
+//    section_node_t *sec = malloc(sizeof(section_node_t));
+//    size_t len = strlen(section_name);
+//    if (len > 25){
+//        printf("ERROR: name is too long.\n");
+//        return NULL;
+//    }
+//
+//    sec->name = osi_strdup(section_name);
+//
+//    list_append(config->sections, sec);
+//}
+//
+//static section_node_t *section_node_free(const config_t *config, const char *section_name)
+//{
+//    section_node_t *sec = section_node_find(config, section_name);
+//    if (!sec) {
+//        return false;
+//    }
+//    free(sec->name);
+//    list_remove(config->sections, sec);
+//}
+
+static section_t *section_new()
+{
+    section_t *section = malloc(CONFIG_FILE_MAX_SIZE);
+    if (!section) {
+        printf("ERROR: Malloc failed.\n");
+        return NULL;
+    }
+    section->bit_mask = 0;
+    section->length = 0;
+
+    return section;
+}
+
+static void section_free(section_t *section)
+{
+    if (!section) {
+        return;
+    }
+    free(section);
+}
+
+static section_t *section_get(const char *name)
+{
+    nvs_handle fp;
+    esp_err_t err = nvs_open(name, NVS_READONLY, &fp);
+    if (err != ESP_OK) {
         return NULL;
     }
 
-    entry->key = osi_strdup(key);
-    entry->value = osi_strdup(value);
+    section_t *section = section_new();
+    size_t length = CONFIG_FILE_MAX_SIZE;
+    err = nvs_get_blob(fp, NULL, section, &length);
+    if (err != ESP_OK) {
+        // Never run to here.
+        printf("ERROR: nvs_get_blob failed.\n");
+        section_free(section);
+        nvs_close(fp);
+        return NULL;
+    }
+
+    if (length != section->length + sizeof(section_t)) {
+        // Never run to here.
+        printf("ERROR: nvs_get_blob return an error length.\n");
+        printf("%d != %d + %d\n", (int)length, section->length, (int)sizeof(section_t));
+        section_free(section);
+        nvs_close(fp);
+        return NULL;
+    }
+
+    nvs_close(fp);
+    return section;
+}
+
+static bool section_set(const char *name, section_t *section)
+{
+    if (section == NULL) {
+        nvs_erase(name);
+        return true;
+    }
+
+    nvs_handle fp;
+    esp_err_t err = nvs_open(name, NVS_READWRITE, &fp);
+    if (err != ESP_OK) {
+        // Never run to here.
+        printf("ERROR: Open nvs failed\n");
+        nvs_close(fp);
+        return false;
+    }
+
+    err = nvs_set_blob(fp, NULL, section, section->length + sizeof(section_t));
+    if (err != ESP_OK) {
+        // Never run to here.
+        printf("ERROR: nvs_set_blob failed.\n");
+        nvs_close(fp);
+        return false;
+    }
+
+    nvs_close(fp);
+    return true;
+}
+
+/*********************************************************************
+ * APIs of entry                                                     *
+ *********************************************************************/
+
+static entry_t *entry_new(section_t *section, config_type_t config_type, uint8_t *value, uint16_t length)
+{
+    uint16_t length_new = section->length + sizeof(entry_t) + length;
+    if ((length_new + sizeof(section)) > CONFIG_FILE_MAX_SIZE) {
+        printf("ERROR: section full. (current/max) section size: (%d/%d)\n", (int16_t)(section->length + sizeof(section)), length_new);
+        return NULL;
+    }
+
+    entry_t *entry = (entry_t *)(section->value + section->length);
+    section->length = length_new;
+    section->bit_mask |= (1 << config_type);
+
+    entry->config_type = config_type;
+    entry->length = length;
+    memcpy(entry->value, value, length);
     return entry;
 }
 
-static void entry_free(void *ptr)
+static bool entry_free(section_t *section, entry_t *entry)
 {
-    if (!ptr) {
-        return;
+    void *entry_end = (uint8_t *)(entry->value + entry->length);
+    void *section_end = (uint8_t *)(section->value + section->length);
+    if (((void *)entry < (void *)(section->value))
+        || (entry_end > section_end)) {
+        printf("ERROR: The entry is not in the section.\n");
+        return false;
     }
 
-    entry_t *entry = ptr;
-    free(entry->key);
-    free(entry->value);
-    free(entry);
+    uint16_t entry_length = entry->length  + sizeof(entry_t);
+    config_type_t entry_type = entry->config_type;
+
+    uint32_t move_length = (uint32_t)(section_end - entry_end);
+    memmove(entry, entry_end, move_length);
+
+    section->length -= entry_length;
+
+    if(entry_type == CONFIG_SECTONS && entry_get(section, entry_type) != NULL) {
+        return true;
+    }
+    section->bit_mask &= ~(1 << entry_type);
+    return true;
 }
 
-static entry_t *entry_find(const config_t *config, const char *section, const char *key)
+static entry_t *entry_get(section_t *section, config_type_t config_type)
 {
-    section_t *sec = section_find(config, section);
-    if (!sec) {
+    if (!(section->bit_mask & (1 << config_type))) {
         return NULL;
     }
 
-    for (const list_node_t *node = list_begin(sec->entries); node != list_end(sec->entries); node = list_next(node)) {
-        entry_t *entry = list_node(node);
-        if (!strcmp(entry->key, key)) {
+    entry_t *entry;
+    void *p = (void *)section->value;
+    void *secton_end = section->value + section->length;
+    while (p < secton_end) {
+        entry = (entry_t *)p;
+        if(entry->config_type == config_type) {
             return entry;
         }
+        p += (sizeof(entry_t) + entry->length);
     }
 
+    section->bit_mask &= ~(1 << config_type);
     return NULL;
+}
+
+static entry_t *entry_set(section_t *section, config_type_t config_type, uint8_t *value, uint16_t length)
+{
+    if (config_type == CONFIG_SECTONS) {
+        return entry_new(section, config_type, value, length);
+    }
+
+    entry_t *entry = entry_get(section, config_type);
+    if (entry != NULL) {
+        entry_free(section, entry);
+    }
+
+    return entry_new(section, config_type, value, length);
 }
